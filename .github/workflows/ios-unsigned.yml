@@ -53,6 +53,13 @@ jobs:
           rm -rf clients/apple/Libbox.xcframework
           mv Libbox.xcframework clients/apple/
 
+      - name: 对齐 Apple 客户端到 dev 分支（与上游 dev-next 同步 API）
+        run: |-
+          cd clients/apple
+          git fetch origin dev
+          git checkout dev
+          git log --oneline -3
+
       - name: 归档（不签名，保留 entitlements）
         run: |-
           cd clients/apple

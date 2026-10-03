@@ -1,0 +1,128 @@
+name: iOS Unsigned IPA (TrollStore)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（留空自动取 git describe）"
+        required: false
+        default: ""
+
+env:
+  SCHEME: SFI
+  ARCHIVE_PATH: build/SFI.xcarchive
+
+jobs:
+  build:
+    name: 构建未签名 IPA
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: 拉取代码（含子模块）
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: 选定 Xcode 稳定版
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app && xcodebuild -version
+
+      - name: 计算版本号
+        id: ver
+        run: |-
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "name=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            TAG=$(git describe --tags --always --dirty 2>/dev/null || echo "dev-$(git rev-parse --short HEAD)")
+            echo "name=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 安装 gomobile / gobind
+        run: make lib_install
+
+      - name: 编译 Libbox.xcframework
+        run: |-
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go run ./cmd/internal/build_libbox -target apple -platform ios
+          ls -lh Libbox.xcframework
+          rm -rf clients/apple/Libbox.xcframework
+          mv Libbox.xcframework clients/apple/
+
+      - name: 归档（不签名，保留 entitlements）
+        run: |-
+          cd clients/apple
+          xcodebuild archive \
+            -scheme "${SCHEME}" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "../${ARCHIVE_PATH}" \
+            -derivedDataPath ../build/dd \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            EXPANDED_PROVISIONING_PROFILE_PROPERTIES=""
+
+      - name: 检查归档产物
+        run: |-
+          APP_PATH="${ARCHIVE_PATH}/Products/Applications"
+          ls -lh "$APP_PATH"
+          echo "--- 主 App 内容 ---"
+          ls -lh "$APP_PATH"/*.app | head
+          echo "--- PlugIns（网络扩展） ---"
+          find "$APP_PATH" -name "PlugIns" -type d -exec ls -lh {} \;
+
+      - name: 手动打包未签名 IPA（TrollStore 兼容）
+        run: |-
+          set -e
+          STAGE=$(pwd)/build/ipastage
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/Payload"
+          APP_SRC="${ARCHIVE_PATH}/Products/Applications"
+          # 拷贝主 App（含 PlugIns 内的网络扩展）
+          cp -R "$APP_SRC"/*.app "$STAGE/Payload/"
+          APP_NAME=$(basename "$APP_SRC"/*.app)
+          APP_BUNDLE="$STAGE/Payload/$APP_NAME"
+
+          # TrollStore 需要保留 entitlements：把工程里的 .entitlements 一并放进 app bundle，
+          # TrollStore 重签时会读取并注入（networkextension / get-task-allow 等）。
+          cd clients/apple
+          find . -name "*.entitlements" -not -path "./Pods/*" | while read -r f; do
+            rel="${f#./}"
+            target="$APP_BUNDLE/$(basename "$rel")"
+            cp "$f" "$target"
+            echo "注入 entitlements: $rel -> $target"
+          done
+
+          # 移除任何残留的 _CodeSignature / embedded.mobileprovision，避免 TrollStore 误判
+          find "$STAGE/Payload" \( -name "_CodeSignature" -o -name "embedded.mobileprovision" \) -print -exec rm -rf {} + || true
+
+          # 生成符号表 zip（可选，方便调试崩溃）
+          DSYM_SRC="${ARCHIVE_PATH}/dSYMs"
+          if [ -d "$DSYM_SRC" ]; then
+            (cd "$DSYM_SRC" && zip -qr "../../SFSymbols-${{ steps.ver.outputs.name }}.dSYM.zip" .)
+          fi
+
+          # 打包成 IPA
+          cd "$STAGE"
+          OUT="${GITHUB_WORKSPACE}/App-unsigned.ipa"
+          zip -qr "$OUT" Payload
+          ls -lh "$OUT"
+          echo "IPA 路径: $OUT"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: App-unsigned
+          path: |
+            ${{ github.workspace }}/App-unsigned.ipa
+            ${{ github.workspace }}/SFSymbols-*.dSYM.zip
+          if-no-files-found: error
+          retention-days: 14

@@ -58,6 +58,7 @@ jobs:
           cd clients/apple
           git fetch origin dev
           git checkout dev
+          git submodule update --init --recursive
           git log --oneline -3
 
       - name: 归档（不签名，保留 entitlements）

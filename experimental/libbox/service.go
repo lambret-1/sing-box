@@ -273,5 +273,15 @@ func (w *platformInterfaceWrapper) WriteMessage(level log.Level, message string)
 }
 
 func (w *platformInterfaceWrapper) SendNotification(notification *platform.Notification) error {
-	return w.iif.SendNotification((*Notification)(notification))
+	// platform.Notification 字段比 libbox.Notification 多（Clipboard/MediaURL 等），
+	// 二者底层类型不同，不能直接强转，需逐字段拷贝公共字段。
+	return w.iif.SendNotification(&Notification{
+		Identifier: notification.Identifier,
+		TypeName:   notification.TypeName,
+		TypeID:     notification.TypeID,
+		Title:      notification.Title,
+		Subtitle:   notification.Subtitle,
+		Body:       notification.Body,
+		OpenURL:    notification.OpenURL,
+	})
 }
